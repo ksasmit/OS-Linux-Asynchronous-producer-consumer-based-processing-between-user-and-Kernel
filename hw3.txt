@@ -1,0 +1,260 @@
+		 CSE-506 (Fall 2015) Homework Assignment #3
+		  (100 points, 20% of your overall grade)
+			   Version 2 (11/5/2015)
+		      Due Thursday 12/3/2015 @ 11:59pm
+
+* PURPOSE:
+
+To learn about asynchronous and concurrent processing, kernel locking,
+efficiency, and callbacks.
+
+* BACKGROUND
+
+As the last assignment of the semester, this is a more open ended one.
+Several details are left unspecified on purpose.  This is to give you a
+chance to explore additional features within the context of this assignment.
+Of course, be sure to document all of your features carefully.
+
+For HW3, you may work alone or in teams.  If you work in a team/group (max
+team size is 4), then you MUST declare your project group by Saturday
+11/14/2015 at 11:59pm sharp, and get a shared GIT repository; the sooner the
+better.  To declare a group, email me the members of the group by this
+deadline: full name, CS AD/NetID username, and SBID.  All teams will be
+graded equally using the same grading criteria; however, at the end of the
+semester, I will take team sizes into account when deciding on final
+course/letter grades.
+
+* OVERVIEW:
+
+Certain processing of data files, such as encryption or compression,
+consumes a lot of CPU.  But it also requires a lot of I/O activity, because
+the file's data buffers have to be copied between user and kernel levels,
+producing expensive data copies and context switches.
+
+An alternative is to read the files in the kernel, do all the CPU-heavy
+processing on them, and then write it back out directly.  This can eliminate
+expensive user/kernel data copies and context switches.
+
+Another problem is that such processing takes a long time, no matter whether
+you do it in the kernel or user level.  We don't want user programs to wait
+too long, and we don't want to wait for system calls that may take a long
+time to finish either.
+
+So an additional solution is to perform this processing asynchronously.  The
+user program will "submit" a request to the kernel to process a file, say,
+encrypt or compress it.  The user program will NOT wait for the request to
+be processed, however.  The kernel will accept the request and queue it for
+processing, for example using a FCFS policy or any other priority based
+policy.  That way, the user program doesn't need to block waiting for the
+request to finish.
+
+The last problem we have is caused by the very nature of asynchronous
+processing: how does the kernel inform the user program about the status of
+such a request?  How do we propagate errors?  How does user-land know when
+the request was processed and finished?
+
+* TASK:
+
+Create a Linux kernel module (in vanilla 4.0.y Linux that's in your personal
+or group HW3 GIT repository) that, when loaded into Linux, will support a
+new multi-mode system call called:
+
+	int sys_submitjob(void *args, int argslen)
+
+With such a void*, you can encode anything you want.  Your system should
+support the ability to submit jobs to the kernel for processing.  The job
+descriptions could include
+
+- unique code for a job type
+- what file name(s) to process
+- what to do with them (encrypt, compress, compute checksum, etc.)
+- configuration processing (e.g., cipher name, checksum alg, compression, etc.)
+- flags that control processing (atomicity, error handling, priority, etc.)
+- anything else you can think of that's useful
+
+Your module, when loaded, should instantiate at least one producer-consumer
+work queue, as well as one or more kernel threads to process the queue.
+Your system call should submit jobs to the queue(s).  The scheduler should
+wake up one or more queues as needed to perform the work needed in the
+queue.  When there's no work to do, no kthreds should run.
+
+You should support a method to REMOVE queued jobs (maybe you changed your
+mind); support a method to LIST all queued jobs in user-land; support a
+method to change the priority of a job in the queue, which should reorder it
+in the list of pending jobs.  You can be clever and reuse the
+sys_submitjob() syscall for these remove and list operations.
+
+Based on what we study in class, you should consider issues of efficiency,
+correctness, concurrency, races, deadlocks, and more.
+
+Because this is an open-ended assignment, you have a lot of freedom.  The
+more features you support, the better your grade will be.  But your code has
+to be first and foremost stable, clean, correct, and efficient.  It is
+therefore recommended that you build a simple system first, then add new
+features to it gradually.
+
+Linux supports a number of work-queue mechanisms and all sorts of locks
+(spinlock, mutex, rwsem, rcu).  Linux also has asynchronous I/O system calls
+(AIO) and VFS methods.  Study all of those carefully.  Feel free to utilize
+existing mechanism in Linux, write your own, or any mix.
+
+Examples of features that your system call may support are:
+
+1. Encrypt (or decrypt) file F1 with cipher C and key K.  Options include
+   overwriting/deleting original file, or renaming file F1 to F2.  Return an
+   error code or success code.
+
+2. Compress (or decompress) file F1 with algorithm C.  Options include
+   overwriting/deleting original file, or renaming file F1 to F2.  Return an
+   error code or success code.  Optionally you may return the size of the
+   compressed file.
+
+3. Compute checksum C for file F1, using hashing algorithm H.  Return
+   checksum back to userland, or error code.
+
+4. Concatenate 2 or more files (F1, F2, .. Fn) into one output file.
+
+Implement at least one of the above four options, or all four if you can.
+You can also be creative and implement additional or other features,
+documented well of course.  For all three examples above, you can use the
+Linux subsystem called CryptoAPI, which allows you to encrypt, compress, or
+checksum data; study how CryptoAPI works.
+
+Returning information asynchronously back to a user application can be
+tricky.  You can consider various mechanisms such as signals, shared memory,
+polling a descriptor, or any other facility you deem suitable (see how the
+AIO syscalls work).  Also consider "netlink" sockets that provide a flexible
+user-kernel communication channel: when one side of the channel "writes" to
+the channel, the other end automatically gets interrupted to "read" the
+data.  The key, however, is that the user program CANNOT busy-wait for the
+kernel to finish its work; user programs may submit a job to the kernel,
+then go off to do something else while they wait for the kernel to be done.
+Note that the user process can also die / exit after sending request to the
+kernel.  In this case, the kernel should not panic and handle it gracefully.
+You will have to write small user-level programs to demonstrate the utility
+of your new system call.  Be sure to thoroughly test your code and document
+it.
+
+Lastly, we require 30-minute demos from each team of their code (signup
+sheets will be posted later).  So be prepared to demo your system and its
+unique features at the end of the semester.  Demos will be held during
+finals week, between Friday-Monday, December 4-7, 2015.
+
+* A WORKING TEMPLATE
+
+Just as with HW1, you can clone your own HW3 repository for this assignment:
+
+# git clone ssh://USER@scm.cs.stonybrook.edu:130/scm/cse506git-f15/hw3-USER
+
+Note, however, that if you're working in a team, then you'll get a
+group-shared repository named slighly differently; an email will be sent to
+the group to let you know your group repository name.
+
+* STYLE AND MORE:
+
+Aside from testing the proper functionality of your code, we will also
+carefully evaluate the quality of your code.  Be sure to use a consistent
+style, well documented, and break your code into separate functions and/or
+source files as it makes sense.
+
+To be sure your code is very clean.  Ideally it should compile with "gcc
+-Wall" without any errors or warnings.  We'll deduct points for any warning
+that we feel should be easy to fix.
+
+Read Documentation/CodingStyle to understand which coding style is preferred
+in the kernel and stick to it for this assignment.  Run your kernel code
+through the syntax checker in scripts/checkpatch.pl (with the "strict"
+option turned on), and fix every warning that comes up.  Cleaner code tends
+to be less buggy.
+
+If the various sources you use require common definitions, then do not
+duplicate the definitions.  Make use of C's code-sharing facilities such as
+common header files.
+
+Instead of a simple README file, for this assignment you must submit a
+design document called "design.pdf" (in PDF format only).  Commit it to the
+hw3/ folder under the top-level of your source tree.  This document is
+mandatory and will count as part of your grade.  In this design document,
+you should specify your design, major data structures, features you've
+implemented, major functions/methods and what they do, locking semantics,
+queuing behavior, and anything special we should note.  Feel free to include
+figures and graphs that help explain the architecture of your system.  The
+design document should list the names of all team members, the class and the
+date.  A typical design document would be 2-5 pages, but the more detailed
+the better.
+
+* SUBMISSION
+
+You will need to submit all of your sources, headers, scripts, Makefiles,
+and design.pdf document.  Submit all of your files using GIT.  See
+general GIT submission guidelines on the class Web site.
+
+As part of this assignment, you should also build a 4.0.y kernel that's
+small but includes all the features you want/need (but without breaking the
+normal CentOS boot).  Commit your .config kernel file into GIT, but rename
+it "hw3/kernel.config".
+
+To submit new files, use the subdirectory named "hw3" inside hw3-<user>
+directory (or team folder) that you checked out.  Remember to git add,
+commit, and push this new directory.  Put all new files that you add in this
+directory.  This may include user space program (.c and .h files),
+design.pdf, kernel files (in case you are implementing system call as a
+loadable kernel module), Makefile, kernel.config, or anything else you deem
+appropriate.
+
+For existing kernel source to which you make modification, use git
+add, commit, and push as mentioned on class web site.
+
+There must be a Makefile in hw3/ directory.  Doing a "make" in hw3/ should
+accomplish the following:
+
+1. Compile all user space programs to produce the executable(s) needed to
+   test the syscall.  Of course, all programs should be well commented and
+   documented.
+
+2. In case you are implementing your system call as a loadable kernel
+   module, the "make" command should also produce a sys_submitjob.ko file
+   which can be insmod'ed into the kernel.
+
+Use gcc -Wall -Werror in makefile commands for user-level code.  Note that
+only your code must pass -Wall -Werror: the rest of the kernel code doesn't
+have to but should still not produce errors or obvious warnings that can be
+easily fixed.
+
+Note that in case you are implementing system call directly in the kernel
+code (and not as a loadable kernel module), then just compiling and
+installing your kernel should activate the system call.
+
+Just to give you an idea how we will grade your submission: We will check
+out your git repository.  We will use kernel.config file in hw3/
+subdirectory to compile and then install your kernel.  We will then do a
+make in hw3/ subdirectory.  If your implementation is based on a loadable
+module, we will expect sys_submitjob.ko to be present in hw3/ after doing a
+make.  We will then insmod it and use the programs in hw3/ (also generated
+as part of make) to test your system call on various inputs.  Note that
+insmod step will be skipped in case you implement system call directly into
+the kernel.  Recall that we may have demos in this last assignment, to
+streamline the grading of this open-ended assignment.
+
+PLEASE test your submission before submitting it, by doing a dry run of
+above steps.  DO NOT make the common mistake of writing code until the very
+last minute, and then trying to figure out how to use GIT and skipping the
+testing of what you submitted.  You will lose valuable points if you do not
+get to submit on time or if you submission is incomplete.
+
+Make sure that you follow above submission guidelines strictly.  We *will*
+deduct points for not following this instructions precisely.
+
+* EXTRA CREDIT
+
+There's no explicit extra credit in this assignment.  However, because it is
+open-ended in nature, we will look for students whose assignment went above
+and beyond the call of duty, and consider giving those students some number
+of extra credit points.  Feel free to be creative and impress us.
+
+Good luck.
+
+* Change History:
+
+11/3/2015: v1
+11/5/2015: v2, TA review
