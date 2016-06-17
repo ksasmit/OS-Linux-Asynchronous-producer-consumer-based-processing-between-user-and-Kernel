@@ -5,6 +5,8 @@
  * but once finalized, try not to change them later. These arguments are passed
  * by consumer extracted from job packet */
 
+#include <linux/fs_struct.h>
+
 /*
 	function to validate the input sent in by caller
 */
@@ -26,7 +28,7 @@ long validate_job(void *arg)
 		printk("user_args invalid\n");
 		return -EFAULT;
 	}
-	
+
 	if(user_args->job_type != CHECKSUM &&
 	   user_args->job_type != ENCRYPT &&
 	   user_args->job_type != DECRYPT &&
@@ -34,10 +36,11 @@ long validate_job(void *arg)
 	   user_args->job_type != DECOMPRESS &&
 	   user_args->job_type != LIST_JOBS &&
 	   user_args->job_type != DELETE_JOB &&
+	   user_args->job_type != FLUSH_JOBS &&
 	   user_args->job_type != CHANGE_PRIORITY){
 		   return -EINVAL;
 	   }
-	   
+
 	if(user_args->job_type == ENCRYPT ||
 	   user_args->job_type == DECRYPT) {
 		   if(user_args->algo != AES &&
@@ -45,35 +48,36 @@ long validate_job(void *arg)
 				  return -EINVAL;
 			  }
 	   }
-	   
+
 	 if(user_args->job_type == CHECKSUM) {
 		   if(user_args->algo != MD5 &&
 			  user_args->algo != CRC32){
 				  return -EINVAL;
 			  }
 	   }
-	   
+
 	if(user_args->priority != HIGH_PRIORITY &&
 	   user_args->priority != LOW_PRIORITY){
 		  return -EINVAL;
 	  }
-	  
-	if(user_args->job_type == DELETE_JOB && 
+
+	if(user_args->job_type == DELETE_JOB &&
 	   user_args->job_id == 0) {
 		   return -EINVAL;
 	   }
-	   
-	if(user_args->job_type == CHANGE_PRIORITY && 
+
+	if(user_args->job_type == CHANGE_PRIORITY &&
 	   user_args->job_id == 0) {
 		   return -EINVAL;
 	   }
-	   
-	if(user_args->job_type == DELETE_JOB || 
-	   user_args->job_type == LIST_JOBS || 
+
+	if(user_args->job_type == DELETE_JOB ||
+	   user_args->job_type == LIST_JOBS ||
+	   user_args->job_type == FLUSH_JOBS ||
 	   user_args->job_type == CHANGE_PRIORITY) {
 		   goto exit_final;
 	   }
-	  
+
 	/* check if input file name pointer is valid and is accesible*/
 	if (user_args->infile == NULL) {
 		printk("userArgs->inputFile NULL\n");
@@ -85,6 +89,10 @@ long validate_job(void *arg)
 				  sizeof(user_args->infile))) {
 		printk("userArgs->inputFile invalid\n");
 		return -EFAULT;
+	}
+
+	if (user_args->job_type == CHECKSUM) {
+		   goto exit_final;
 	}
 
 	/* check if output file name pointer is valid and is accesible */
@@ -114,17 +122,17 @@ long validate_job(void *arg)
 			printk("userArgs->keyHash invalid\n");
 			return -EFAULT;
 		}
-		
+
 		/* validation on keyLength, should be 6 or greater */
 		if (user_args->keyLength < KEYLENGTH_MIN) {
 			printk("Invalid keyLength value\n");
 			return -EINVAL;
 		}
 	}
-	 
+
 	// some validation on process id?
 exit_final:
-	printk("all validation passed\n");
+	//printk("all validation passed\n");
 	return status;
 }
 
@@ -139,7 +147,7 @@ struct file *open_file_to_read(char *filename)
 	/*printk("filename %s\n",filename);*/
 	filp = filp_open(filename, O_RDONLY, 0);
 	if ((filp == NULL) || IS_ERR(filp)) {
-		printk("open_file_to_read failed %ld\n", PTR_ERR(filp));
+		//printk("\nopen_file_to_read failed %ld\n", PTR_ERR(filp));
 		filp = NULL;
 		goto exit_final;
 	}
@@ -190,7 +198,7 @@ exit_final:
    Returns 0 on success, else appropriate errno is returned.
  */
 
-long check_file_validity(char *inputfile, char *outputfile)
+long check_file_validity(char *inputfile, char *outputfile, int validate_outfile)
 {
 	struct file *filp_input = NULL;
 	struct file *filp_output = NULL;
@@ -203,12 +211,6 @@ long check_file_validity(char *inputfile, char *outputfile)
 		printk("inputFile NULL\n");
 		return_status = -EINVAL;
 		goto exit_final;
-	}
-
-	if (outputfile == NULL) {
-		printk("outputFile NULL\n");
-		return_status = -EINVAL;
-		goto open_outfile_file_failed;
 	}
 
 	filp_input = open_file_to_read(inputfile);
@@ -230,29 +232,41 @@ long check_file_validity(char *inputfile, char *outputfile)
 		goto inputFile_is_directory;
 	}
 
-	filp_output = open_file_to_read(outputfile);
-	if (filp_output == NULL) {
-		printk("Outfile does not exist!\n");
-		return_status = 0;
+	if(validate_outfile)
+	{
+		if (outputfile == NULL) {
+			printk("outputFile NULL\n");
+			return_status = -EINVAL;
+			goto open_outfile_file_failed;
+		}
+
+		filp_output = open_file_to_read(outputfile);
+		if (filp_output == NULL) {
+			printk("Outfile does not exist!\n");
+			return_status = 0;
+			goto outfile_does_not_exist;
+		}
+
+		if (d_is_dir(filp_output->f_path.dentry)) {
+			printk("output file is a directory!\n");
+			return_status = -EISDIR;
+			goto file_validation_failed;
+		}
+
+		if (!d_is_reg(filp_output->f_path.dentry)) {
+			printk("output file is bot regular!\n");
+			return_status = -EINVAL;
+			goto file_validation_failed;
+		}
+
+		outputfile_inode = filp_output->f_path.dentry->d_inode;
+	}
+	else
 		goto outfile_does_not_exist;
-	}
-
-	if (d_is_dir(filp_output->f_path.dentry)) {
-		printk("output file is a directory!\n");
-		return_status = -EISDIR;
-		goto file_validation_failed;
-	}
-
-	if (!d_is_reg(filp_output->f_path.dentry)) {
-		printk("output file is bot regular!\n");
-		return_status = -EINVAL;
-		goto file_validation_failed;
-	}
 
 	inputfile_inode = filp_input->f_path.dentry->d_inode;
-	outputfile_inode = filp_output->f_path.dentry->d_inode;
 
-	/* check if they are same file or symlink to same file 
+	/** check if they are same file or symlink to same file
 	   also cehck their file system is same or not*/
 	if ((inputfile_inode->i_ino == outputfile_inode->i_ino)
 			&& (!strcmp(inputfile_inode->i_sb->s_type->name,
@@ -279,8 +293,16 @@ long copy_userInput_to_kernel(SYS_JOB *user_data,
 						    SYS_JOB *kernel_data)
 {
 	long status = 0;
+	int validate_outfile = 1;
+
+	int pathlen = 0;
+	char *buffer = NULL;
+	char *temp = NULL;
+	char *path = NULL;
+	struct path pwd;
+	char slash = '/';
 	/* printk("copy_userInput_to_kernelData called\n"); */
-	
+
 	status = copy_from_user(&kernel_data->job_type,
 							&user_data->job_type,
 							sizeof(int));
@@ -296,7 +318,7 @@ long copy_userInput_to_kernel(SYS_JOB *user_data,
 		printk("failed to copy userData->process_id");
 		goto exit_final;
 	}
-	
+
 	status = copy_from_user(&kernel_data->algo,
 							&user_data->algo,
 							sizeof(int));
@@ -312,7 +334,15 @@ long copy_userInput_to_kernel(SYS_JOB *user_data,
 		printk("failed to copy userData->priority");
 		goto exit_final;
 	}
-	
+
+	status = copy_from_user(&kernel_data->weak_validation,
+							&user_data->weak_validation,
+							sizeof(int));
+	if (status != 0) {
+		printk("failed to copy userData->weak_validation");
+		goto exit_final;
+	}
+
 	status = copy_from_user(&kernel_data->keyLength,
 							&user_data->keyLength,
 							sizeof(int));
@@ -320,7 +350,7 @@ long copy_userInput_to_kernel(SYS_JOB *user_data,
 		printk("failed to copy userData->keyLength");
 		goto exit_final;
 	}
-	
+
 	status = copy_from_user(&kernel_data->job_id,
 							&user_data->job_id,
 							sizeof(int));
@@ -331,6 +361,7 @@ long copy_userInput_to_kernel(SYS_JOB *user_data,
 
 	if(kernel_data->job_type == LIST_JOBS ||
 	   kernel_data->job_type == DELETE_JOB ||
+	   kernel_data->job_type == FLUSH_JOBS ||
 	   kernel_data->job_type == CHANGE_PRIORITY) {
 		   goto exit_final;
 	   }
@@ -339,8 +370,8 @@ long copy_userInput_to_kernel(SYS_JOB *user_data,
 
 	/*some issue with getname and putname, need to root cause*/
 	/*inputfile*/
-	
-	
+
+	// need to make this absolute paths as kernel threads run in root
 	kernel_data->infile = kmalloc(strlen(user_data->infile) + 1,
 							GFP_KERNEL);
 	if (kernel_data->infile == NULL) {
@@ -348,6 +379,8 @@ long copy_userInput_to_kernel(SYS_JOB *user_data,
 		status = -ENOMEM;
 		goto kmalloc_inputFile_failed;
 	}
+
+	memset(kernel_data->infile, 0, strlen(user_data->infile) + 1);
 
 	status = copy_from_user(kernel_data->infile,
 						user_data->infile,
@@ -360,27 +393,30 @@ long copy_userInput_to_kernel(SYS_JOB *user_data,
 	/* we need to NULL terminate the string*/
 	kernel_data->infile[strlen(user_data->infile)] = '\0';
 
-	/* outputFile */
-	kernel_data->outfile = kmalloc(strlen(user_data->outfile) + 1,
-								GFP_KERNEL);
-	if (kernel_data->outfile == NULL) {
-		printk("kmalloc userData->outputFile failed");
-		status = -ENOMEM;
-		goto kmalloc_outputFile_failed;
+	if (kernel_data->job_type != CHECKSUM) {
+		/* outputFile */
+		kernel_data->outfile = kmalloc(strlen(user_data->outfile) + 1,
+									GFP_KERNEL);
+		if (kernel_data->outfile == NULL) {
+			printk("kmalloc userData->outputFile failed");
+			status = -ENOMEM;
+			goto kmalloc_outputFile_failed;
+		}
+
+		memset(kernel_data->outfile, 0, strlen(user_data->outfile) + 1);
+
+		status = copy_from_user(kernel_data->outfile,
+							user_data->outfile,
+							strlen(user_data->outfile));
+		if (status != 0) {
+			printk("failed to copy userData->outputFile");
+			goto copy_to_kernel_outputFile_failed;
+		}
+
+		kernel_data->outfile[strlen(user_data->outfile)] = '\0';
+		/*printk("%s\n", kernelData->outputFile);*/
 	}
 
-	status = copy_from_user(kernel_data->outfile,
-						user_data->outfile,
-						strlen(user_data->outfile));
-	if (status != 0) {
-		printk("failed to copy userData->outputFile");
-		goto copy_to_kernel_outputFile_failed;
-	}
-
-	kernel_data->outfile[strlen(user_data->outfile)] = '\0';
-	/*printk("%s\n", kernelData->outputFile);*/
-	
-	
 	if(kernel_data->job_type == ENCRYPT ||
 	   kernel_data->job_type == DECRYPT) {
 		/* keyHash */
@@ -393,24 +429,126 @@ long copy_userInput_to_kernel(SYS_JOB *user_data,
 			goto copy_to_kernel_outputFile_failed;
 		}
 	}
-	
-	/* check if output and input file are same */
-	status = check_file_validity(kernel_data->infile,
-					kernel_data->outfile);
-	if (status != 0) {
-		printk("file validation failed!\n");
-		goto copy_to_kernel_outputFile_failed;
+
+	if (kernel_data->job_type == CHECKSUM)
+		validate_outfile = 0;
+
+	if (!kernel_data->weak_validation)
+	{
+		/* check if output and input file are same */
+		status = check_file_validity(kernel_data->infile,
+					kernel_data->outfile, validate_outfile);
+		if (status != 0) {
+			printk("file validation failed!\n");
+			goto copy_to_kernel_outputFile_failed;
+		}
 	}
-	
+	else
+	{
+		printk("\ndiffer validation for now\n");
+	}
+
+	buffer = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (buffer == NULL)
+	{
+	   status = -ENOMEM;
+	   goto exit_final;
+	}
+
+	memset(buffer,0,PAGE_SIZE);
+	get_fs_pwd(current->fs, &pwd);
+	path = d_path(&pwd, buffer, (PAGE_SIZE/2));
+	if (IS_ERR(path)) {
+			 status = PTR_ERR(path);
+			 goto exit_final;
+	 }
+	// printk("\npwd: %s", path);
+	temp = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (temp == NULL)
+	{
+	   status = -ENOMEM;
+	   goto exit_final;
+	}
+
+    pathlen = buffer + (PAGE_SIZE/2) - path;
+
+	if (pathlen <= (PAGE_SIZE/2)) {
+		if (kernel_data->infile && kernel_data->infile[0] != '/')
+		{
+			pathlen = buffer + (PAGE_SIZE/2) - path;
+			memset(temp, 0,PAGE_SIZE);
+			//pathlen = strlen(path);
+			memcpy(temp, path, pathlen);
+			//printk("\ntemp: %s", temp);
+			strncat(temp, &slash, 1);
+			//printk("\ntemp after slash: %s", temp);
+			strncat(temp, kernel_data->infile, strlen(kernel_data->infile));
+			// printk("\ntemp: %s", temp);
+
+			pathlen = strlen(temp);
+			if(kernel_data->infile)
+				kfree(kernel_data->infile);
+			kernel_data->infile = kmalloc(pathlen + 1 , GFP_KERNEL);
+			if (kernel_data->infile == NULL)
+			{
+				status = -ENOMEM;
+				goto copy_to_kernel_outputFile_failed;
+			}
+			memset(kernel_data->infile, 0, pathlen + 1);
+			memcpy(kernel_data->infile, temp, pathlen);
+			//printk("\npwd in kernel : %s\n", kernel_data->infile);
+		}
+
+		if(validate_outfile)
+		{
+			if(kernel_data->outfile && kernel_data->outfile[0] != '/') {
+				pathlen = buffer + (PAGE_SIZE/2) - path;
+				memset(temp, 0,PAGE_SIZE);
+				//pathlen = strlen(path);
+				memcpy(temp, path, pathlen);
+				//printk("\ntemp: %s", temp);
+				strncat(temp, &slash, 1);
+				strncat(temp, kernel_data->outfile, strlen(kernel_data->outfile));
+				// printk("\ntemp: %s", temp);
+
+				pathlen = strlen(temp);
+				if(kernel_data->outfile)
+					kfree(kernel_data->outfile);
+				kernel_data->outfile = kmalloc(pathlen + 1 , GFP_KERNEL);
+				if (kernel_data->outfile == NULL)
+				{
+				   status = -ENOMEM;
+				   goto copy_to_kernel_outputFile_failed;
+				}
+				memset(kernel_data->outfile, 0, pathlen + 1);
+				memcpy(kernel_data->outfile, temp, pathlen);
+				//printk("\npwd out kernel : %s\n", kernel_data->outfile);
+			}
+		}
+	} else {
+		status = -ERANGE;
+		//printk("\ngetting pwd failed");
+	}
+
 	goto exit_final;
 
 copy_to_kernel_outputFile_failed:
-	kfree(kernel_data->outfile);
+	if (kernel_data->outfile) {
+		kfree(kernel_data->outfile);
+		kernel_data->outfile = NULL;
+	}
 kmalloc_outputFile_failed:
 copy_to_kernel_inputFile_failed:
-	kfree(kernel_data->infile);
+	if(kernel_data->infile) {
+		kfree(kernel_data->infile);
+		kernel_data->infile = NULL;
+	}
 kmalloc_inputFile_failed:
 exit_final:
+	if(temp)
+		kfree(temp);
+	if (buffer)
+		kfree(buffer);
 	return status;
 }
 
@@ -450,7 +588,7 @@ int compress_file(char *infile, char *outfile) {
 		printk("\n Error: I/P file doesn't allow read operation.");
 		goto out;
 	}
-	wfilp = filp_open(outfile, O_RDWR | O_CREAT | O_TRUNC, 655);
+	wfilp = filp_open(outfile, O_RDWR | O_CREAT | O_TRUNC, 0777 & ~current_umask());
 	if (!wfilp || IS_ERR(wfilp)) {
 		ret = (int) PTR_ERR(wfilp);
 		printk(KERN_ALERT "\n Error: Opening O/P file ");
@@ -480,11 +618,11 @@ int compress_file(char *infile, char *outfile) {
 	if (ret < 0) {
 		printk(KERN_ALERT "\n Error: Compression failed");
 		//printk(KERN_ALERT "\n inbuf = %s, read_len = %d, outbuf = %s, outlen = %d, ret = %d",inbuf, read_len, outbuf, outlen, ret);
-		printk(KERN_ALERT "\n read_len = %d, outlen = %d, ret = %d", read_len, outlen, ret);
+		//printk(KERN_ALERT "\n read_len = %d, outlen = %d, ret = %d", read_len, outlen, ret);
 		goto outrw;
 	}
 	write_len = vfs_write(wfilp, outbuf, outlen, &wfilp->f_pos);
-	printk(KERN_ALERT "\n write_len = %d", write_len);
+	//printk(KERN_ALERT "\n write_len = %d", write_len);
 	if (write_len < 0) {
 		printk(KERN_ALERT "\n Error: writing O/P file");
 		ret = write_len;
@@ -554,15 +692,15 @@ int decompress_file(char *infile, char *outfile) {
 		printk("\n Error: I/P file doesn't allow read operation.");
 		goto out;
 	}
-	wfilp = filp_open(outfile, O_RDWR | O_CREAT | O_TRUNC, 655);
+	wfilp = filp_open(outfile, O_RDWR | O_CREAT | O_TRUNC, 0777 & ~current_umask());
 	if (!wfilp || IS_ERR(wfilp)) {
 		ret = (int) PTR_ERR(wfilp);
-		printk(KERN_ALERT "\n Error: Opening O/P file ");
+		printk(KERN_ALERT "\nError: Opening O/P file ");
 		goto out;
 	}
 	if (!wfilp->f_op->write) {
 		ret = (int) PTR_ERR(wfilp);
-		printk(KERN_ALERT "\n Error: O/P file doesn't allow write operation");
+		printk(KERN_ALERT "\nError: O/P file doesn't allow write operation");
 		goto out;
 	}
 	oldfs = get_fs();
@@ -571,40 +709,40 @@ int decompress_file(char *infile, char *outfile) {
 	wfilp->f_pos = 0;
 	read_len = vfs_read(rfilp, inbuf, PAGE_SIZE, &rfilp->f_pos);
 	if (read_len < 0) {
-		printk(KERN_ALERT "\n Error: reading I/P file");
+		printk(KERN_ALERT "\nError: reading I/P file");
 		ret = read_len;
 		goto outrw;
 	}
 	ret = crypto_comp_decompress(tfm, inbuf, read_len, outbuf, &outlen);
 	if (ret < 0) {
-		printk(KERN_ALERT "\n Error: Decompression failed");
-		printk(KERN_ALERT "\n read_len = %d, outlen = %d, ret = %d", read_len, outlen, ret);
+		printk(KERN_ALERT "\nError: Decompression failed");
+		//printk(KERN_ALERT "\nread_len = %d, outlen = %d, ret = %d", read_len, outlen, ret);
 		//printk(KERN_ALERT "\n inbuf = %s, read_len = %d, outbuf = %s, outlen = %d, ret = %d",inbuf, read_len, outbuf, outlen, ret);
 		goto outrw;
 	}
 	write_len = vfs_write(wfilp, outbuf, outlen, &wfilp->f_pos);
-	printk(KERN_ALERT "\n write_len = %d", write_len);
+	//printk(KERN_ALERT "\nwrite_len = %d", write_len);
 	if (write_len < 0) {
-		printk(KERN_ALERT "\n Error:writing O/P file");
+		printk(KERN_ALERT "\nError:writing O/P file");
 		ret = write_len;
 		goto outrw;
 	}
 outrw:
 	set_fs(oldfs);
 out:
-	if (rfilp){
+	if (rfilp) {
 		filp_close(rfilp, NULL);
 		rfilp = NULL;
 	}
-	if (wfilp){
+	if (wfilp) {
 		filp_close(wfilp, NULL);
 		wfilp = NULL;
 	}
-	if (inbuf){
+	if (inbuf) {
 		kfree(inbuf);
 		inbuf = NULL;
 	}
-	if (outbuf){
+	if (outbuf) {
 		kfree(outbuf);
 		outbuf = NULL;
 	}
@@ -621,8 +759,8 @@ int decrypt_file(char *infile, char *outfile, char *key, int algo) {
 	bool dest_file_doesnt_exist = false;
 
 	struct file *ifp = NULL; // pointer to input file to be encrypted/ decrypted
-	struct file *ofp = NULL; // pointer to temp o/p file 
-	struct file *dest_file = NULL; // pointer final o/p file 
+	struct file *ofp = NULL; // pointer to temp o/p file
+	struct file *dest_file = NULL; // pointer final o/p file
 	struct crypto_blkcipher *cipher_handle = NULL;
 	struct scatterlist *src = NULL;
 	struct scatterlist *dst = NULL;
@@ -632,18 +770,18 @@ int decrypt_file(char *infile, char *outfile, char *key, int algo) {
 	char* ciphertext_buf = NULL;
 	char* ciphered_key = NULL;
 	char* deciphered_key = NULL;
-
+	char *tempfile = NULL;
 	/***********************************************************************
 	 * checking files validity
 	 ***********************************************************************/
-	if (check_file_validity(infile, outfile) != 0){
+	if (check_file_validity(infile, outfile, 1) != 0){
 		printk("Invalid Files!\n");
 		err = -EINVAL;
 		goto out;
-	}	
-	//stripping off an extra byte in key 
+	}
+	//stripping off an extra byte in key
 	key[DIGEST_SIZE]=0;
-	/************************************************************************ 
+	/************************************************************************
 	 * open input file
 	 *************************************************************************/
 	old_fs = get_fs();
@@ -713,7 +851,7 @@ int decrypt_file(char *infile, char *outfile, char *key, int algo) {
 	ifp->f_pos = 0;
 	bytes_read = vfs_read(ifp, ciphered_key, strlen(key), &ifp->f_pos);
 
-	if (bytes_read < 0) { 
+	if (bytes_read < 0) {
 		printk("Raeding from file failed\n");
 		err = -EPERM;
 		goto out;
@@ -738,13 +876,13 @@ int decrypt_file(char *infile, char *outfile, char *key, int algo) {
 		printk("Invalid Password for decryption\n");
 		goto out;;
 	}
-	
-	/* 
+
+	/*
 	 * Authentication successfull
 	 */
 
 
-	/************************************************************************ 
+	/************************************************************************
 	 * Open out file & check files
 	 *************************************************************************/
 	/*
@@ -753,8 +891,21 @@ int decrypt_file(char *infile, char *outfile, char *key, int algo) {
 	 * O_TRUNC         truncate size to 0
 	 * O_EXCL          error if create and file exists
 	 */
+	//printk("Decryption creating  temp file!\n");
+	tempfile = kzalloc(strlen(outfile) + 5, GFP_KERNEL);
 
-	ofp = open_file_to_write("temp_file",0);
+	if (!tempfile)
+	{
+		err = -ENOMEM;
+		goto out;
+	}
+	/********************************************************
+	* new file will have name as "infile.md5"
+	********************************************************/
+	strcpy(tempfile, outfile);
+	strcat(tempfile, ".tmp");
+
+	ofp = open_file_to_write(tempfile,0);
 	if (!ofp){
 		printk("Error in opening temp file!\n");
 		err = -ENOENT;
@@ -765,14 +916,14 @@ int decrypt_file(char *infile, char *outfile, char *key, int algo) {
 	ofp->f_inode->i_mode = ifp->f_inode->i_mode;
 
 	// destination file open
-	dest_file = filp_open(outfile , O_EXCL, 0); // opens existing outfile  
+	dest_file = filp_open(outfile , O_EXCL, 0); // opens existing outfile
 	if (IS_ERR((void *)dest_file)) {
 		printk("outfile doesn't exist, process is creating new\n");
 		dest_file_doesnt_exist = true;
 	}
 
 	if (dest_file_doesnt_exist) {
-		dest_file = filp_open(outfile , O_CREAT, 0); // create new out file  
+		dest_file = filp_open(outfile , O_CREAT, 0); // create new out file
 		if (IS_ERR((void *)dest_file)) {
 			printk("Error in opening output file\n");
 			err = -ENOENT;
@@ -790,7 +941,7 @@ int decrypt_file(char *infile, char *outfile, char *key, int algo) {
 		}
 	}
 
-	/************************************************************************ 
+	/************************************************************************
 	 * batch mode read and write for decryption
 	 *************************************************************************/
 	sg_init_one(dst, plaintext_buf, PAGE_SIZE);
@@ -810,7 +961,7 @@ int decrypt_file(char *infile, char *outfile, char *key, int algo) {
 			goto cleanup;
 		}
 		else if (bytes_read == PAGE_SIZE) { //Full read:Yet to reach at the last batch
-#ifdef EXTRA_CREDIT                              
+#ifdef EXTRA_CREDIT
 			ret = crypto_blkcipher_decrypt_iv(&desc, dst, src, PAGE_SIZE);
 #else
 			ret = crypto_blkcipher_decrypt(&desc, dst, src, PAGE_SIZE);
@@ -834,7 +985,7 @@ int decrypt_file(char *infile, char *outfile, char *key, int algo) {
 		}
 		else if(bytes_read < PAGE_SIZE) {
 			done = true; // finished the process
-#ifdef EXTRA_CREDIT                              
+#ifdef EXTRA_CREDIT
 			ret = crypto_blkcipher_decrypt_iv(&desc, dst, src, bytes_read);
 #else
 			ret = crypto_blkcipher_decrypt(&desc, dst, src, bytes_read);
@@ -864,11 +1015,18 @@ int decrypt_file(char *infile, char *outfile, char *key, int algo) {
 		iter++;
 	} while (!done);
 
+
+	lock_rename(ofp->f_path.dentry->d_parent,\
+			dest_file->f_path.dentry->d_parent);
+
 	// rename temp file to destination file
 	ret = vfs_rename(ofp->f_path.dentry->d_parent->d_inode,\
 			ofp->f_path.dentry, \
 			dest_file->f_path.dentry->d_parent->d_inode, \
 			dest_file->f_path.dentry, NULL, 0);
+
+	unlock_rename(ofp->f_path.dentry->d_parent,\
+			dest_file->f_path.dentry->d_parent);
 
 	if (ret != 0) {
 		printk("Error in renaming.\n");
@@ -942,8 +1100,8 @@ int encrypt_file(char *infile, char *outfile, char *key, int algo) {
 	bool dest_file_doesnt_exist = false;
 
 	struct file *ifp = NULL; // pointer to input file to be encrypted/ decrypted
-	struct file *ofp = NULL; // pointer to temp o/p file 
-	struct file *dest_file = NULL; // pointer final o/p file 
+	struct file *ofp = NULL; // pointer to temp o/p file
+	struct file *dest_file = NULL; // pointer final o/p file
 	struct crypto_blkcipher *cipher_handle = NULL;
 	struct scatterlist *src = NULL;
 	struct scatterlist *dst = NULL;
@@ -952,17 +1110,19 @@ int encrypt_file(char *infile, char *outfile, char *key, int algo) {
 	char* plaintext_buf = NULL;
 	char* ciphertext_buf = NULL;
 	char* ciphered_key = NULL;
-
+	char *tempfile = NULL;
+	//printk("\ninputfile : %s", infile);
+	//printk("\noutputfile : %s", outfile);
 	/***********************************************************************
 	 * checking files validity
 	 ***********************************************************************/
-	if (check_file_validity(infile, outfile) != 0){
+	if (check_file_validity(infile, outfile, 1) != 0){
 		printk("Invalid Files!\n");
 		err = -EINVAL;
 		goto out;
-	}	
+	}
 
-	/************************************************************************ 
+	/************************************************************************
 	 * open input file
 	 *************************************************************************/
 	old_fs = get_fs();
@@ -1011,7 +1171,7 @@ int encrypt_file(char *infile, char *outfile, char *key, int algo) {
 		err = -ENOMEM;
 		goto out;
 	}
-	
+
 //stripping off the extra byte in key
 	key[DIGEST_SIZE]=0;
 
@@ -1020,7 +1180,7 @@ int encrypt_file(char *infile, char *outfile, char *key, int algo) {
 	 */
 	ret = crypto_blkcipher_setkey(cipher_handle, key, strlen(key));
 	if (ret < 0) {
-		printk("Error in setting cipher key.");
+		printk("Error in setting cipher key.\n");
 		err = -EINVAL;
 		goto out;
 	}
@@ -1028,7 +1188,7 @@ int encrypt_file(char *infile, char *outfile, char *key, int algo) {
 	desc.tfm = cipher_handle;
 	desc.flags = 0; // can be set to 0 or CRYPTO_TFM_REQ_MAY_SLEEP
 
-	/************************************************************************ 
+	/************************************************************************
 	 * Open out file & check files
 	 *************************************************************************/
 	/*
@@ -1037,8 +1197,19 @@ int encrypt_file(char *infile, char *outfile, char *key, int algo) {
 	 * O_TRUNC         truncate size to 0
 	 * O_EXCL          error if create and file exists
 	 */
-
-	ofp = open_file_to_write("temp_file",0);
+	//printk(" encryption creating  temp file!\n");
+	tempfile = kzalloc(strlen(outfile) + 5, GFP_KERNEL);
+	if (!tempfile)
+	{
+		err = -ENOMEM;
+		goto out;
+	}
+	/********************************************************
+	* new file will have name as "infile.md5"
+	********************************************************/
+	strcpy(tempfile, outfile);
+	strcat(tempfile, ".tmp");
+	ofp = open_file_to_write(tempfile,0);
 	if (!ofp){
 		printk("Error in opening temp file!\n");
 		err = -ENOENT;
@@ -1049,14 +1220,14 @@ int encrypt_file(char *infile, char *outfile, char *key, int algo) {
 	ofp->f_inode->i_mode = ifp->f_inode->i_mode;
 
 	// destination file open
-	dest_file = filp_open(outfile , O_EXCL, 0); // opens existing outfile  
+	dest_file = filp_open(outfile , O_EXCL, 0); // opens existing outfile
 	if (IS_ERR((void *)dest_file)) {
 		printk("outfile doesn't exist, process is creating new\n");
 		dest_file_doesnt_exist = true;
 	}
 
 	if (dest_file_doesnt_exist) {
-		dest_file = filp_open(outfile , O_CREAT, 0); // create new out file  
+		dest_file = filp_open(outfile , O_CREAT, 0); // create new out file
 		if (IS_ERR((void *)dest_file)) {
 			printk("Error in opening output file\n");
 			err = -ENOENT;
@@ -1074,11 +1245,11 @@ int encrypt_file(char *infile, char *outfile, char *key, int algo) {
 		}
 	}
 
-	/********************************************************************** 
-	 * cipher method + key insertion in ecrypted file: preemble 
+	/**********************************************************************
+	 * cipher method + key insertion in ecrypted file: preemble
 	 ***********************************************************************/
 
-	/* set sg entry to point at key buffer. As length is passed, key buffer 
+	/* set sg entry to point at key buffer. As length is passed, key buffer
 	 * can be passed as const void
 	 */
 //	printk("sg_init_one done for key src =%s size = %d\n", key, strlen(key));
@@ -1100,7 +1271,7 @@ int encrypt_file(char *infile, char *outfile, char *key, int algo) {
 	}
 //	printk("preamle written = %d\n", bytes_written);
 
-	/********************************************************************** 
+	/**********************************************************************
 	 * batch mode read and write for encryption
 	 ***********************************************************************/
 	sg_init_one(src, plaintext_buf, PAGE_SIZE);
@@ -1174,12 +1345,17 @@ int encrypt_file(char *infile, char *outfile, char *key, int algo) {
 		iter++;
 	} while(!done);
 
+	lock_rename(ofp->f_path.dentry->d_parent,\
+			dest_file->f_path.dentry->d_parent);
 
 	// rename temp file to destination file
 	ret = vfs_rename(ofp->f_path.dentry->d_parent->d_inode,\
 			ofp->f_path.dentry, \
 			dest_file->f_path.dentry->d_parent->d_inode, \
 			dest_file->f_path.dentry, NULL, 0);
+
+	unlock_rename(ofp->f_path.dentry->d_parent,\
+			dest_file->f_path.dentry->d_parent);
 
 	if (ret != 0) {
 		printk("Error in renaming.\n");
@@ -1212,6 +1388,9 @@ cleanup:
 	set_fs(old_fs);
 
 out:
+	if(tempfile)
+		kfree(tempfile);
+
 	if (!IS_ERR(cipher_handle)) {
 		crypto_free_blkcipher(cipher_handle);
 	}
@@ -1244,7 +1423,7 @@ out:
 }
 
 /********************************
- * Supporting the MD5 right now 
+ * Supporting the MD5 right now
  * will add more algos support later.
  *******************************/
 int checksum(char *infile) {
@@ -1257,7 +1436,7 @@ int checksum(char *infile) {
 	mm_segment_t oldfs;
 
 	if(!infile){
-		printk("input file is invalid\n");
+		printk(KERN_ALERT "input file is invalid\n");
 		err = -EINVAL;
 		goto out;
 	}
@@ -1269,15 +1448,19 @@ int checksum(char *infile) {
 		goto out;
 	}
 
-	outfile = kzalloc(sizeof(strlen(infile) + 5), GFP_KERNEL);
+	outfile = kzalloc(strlen(infile) + 5, GFP_KERNEL);
 	if (!outfile)
 	{
 		err = -ENOMEM;
 		goto outfree;
 	}
+	/********************************************************
+	* new file will have name as "infile.md5"
+	********************************************************/
 	strcpy(outfile, infile);
-	strcat(outfile, ".md5");
+	strncat(outfile, ".md5", 4);
 
+	//printk(KERN_INFO "outfile = %s\n", outfile);
 	oldfs = get_fs();
 	set_fs(KERNEL_DS);
 
@@ -1285,13 +1468,15 @@ int checksum(char *infile) {
 	if (!f_in || IS_ERR(f_in))
 	{
 		err = PTR_ERR(f_in);
+		set_fs(oldfs);
 		goto outfilefree;
 	}
 
-	f_out = filp_open(outfile, O_CREAT | O_TRUNC, 666);
+	f_out = filp_open(outfile, O_WRONLY|O_CREAT, 0);
 	if (!f_out || IS_ERR(f_out))
 	{
 		err = PTR_ERR(f_out);
+		set_fs(oldfs);
 		goto filpclose;
 	}
 
@@ -1302,13 +1487,15 @@ int checksum(char *infile) {
 	if (!buf)
 	{
 		err = -ENOMEM;
+		set_fs(oldfs);
 		goto ofilpclose;
 	}
-	tfm = crypto_alloc_hash("md5", 0, CRYPTO_ALG_ASYNC);
+	tfm = crypto_alloc_hash("md5", 0, 0);
 	desc.tfm = tfm;
 	desc.flags = 0;
 	crypto_hash_init(&desc);
 
+	//printk(KERN_INFO " Hash Init done \n");
 	do{
 		pending -= cur;
 		bytes = vfs_read(f_in, buf, cur, &f_in->f_pos);
@@ -1316,6 +1503,7 @@ int checksum(char *infile) {
 		crypto_hash_update(&desc, &sg, bytes);
 	}while(pending > 0);
 	crypto_hash_final(&desc, hash_buff);
+	//printk(KERN_INFO "final buf = %s\n", hash_buff);
 	for (i=0; i<DIGEST_SIZE; i++)
 	{
 		sprintf(temp, "%02x", hash_buff[i]);
@@ -1323,15 +1511,20 @@ int checksum(char *infile) {
 
 	bytes = vfs_write(f_out, hash_buff, strlen(hash_buff), &f_out->f_pos);
 	set_fs(oldfs);
-	kfree(buf);
+	if(buf)
+		kfree(buf);
 ofilpclose:
-	filp_close(f_out, NULL);
+	if (f_out)
+		filp_close(f_out, NULL);
 filpclose:
-	filp_close(f_in, NULL);
+	if (f_in)
+		filp_close(f_in, NULL);
 outfilefree:
-	kfree(outfile);
+	if (outfile)
+		kfree(outfile);
 outfree:
-	kfree(hash_buff);
+	if (hash_buff)
+		kfree(hash_buff);
 out:
 	return err;
 }
